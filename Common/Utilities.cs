@@ -7,6 +7,7 @@ using Azure.ResourceManager.Compute.Models;
 using Azure.ResourceManager.Network;
 using Azure.ResourceManager.Network.Models;
 using Azure.ResourceManager.Resources;
+using Renci.SshNet;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -90,6 +91,36 @@ namespace Azure.ResourceManager.Samples.Common
             return vnetLro.Value;
         }
 
+        public static async Task<NetworkInterfaceResource> CreateNetworkInterface(ResourceGroupResource resourceGroup, ResourceIdentifier subnetId, ResourceIdentifier publicIpId, string nicName)
+        {
+            nicName = string.IsNullOrEmpty(nicName) ? CreateRandomName("nic") : nicName;
+
+            Utilities.Log($"Creating network interface...");
+            var nicInput = new NetworkInterfaceData()
+            {
+                Location = resourceGroup.Data.Location,
+                IPConfigurations =
+                    {
+                        new NetworkInterfaceIPConfigurationData()
+                        {
+                            Name = "default-config",
+                            PrivateIPAllocationMethod = NetworkIPAllocationMethod.Dynamic,
+                            Subnet = new SubnetData()
+                            {
+                                Id = subnetId
+                            },
+                            PublicIPAddress = new PublicIPAddressData()
+                            {
+                                Id  = publicIpId
+                            }
+                        }
+                    }
+            };
+            var networkInterfaceLro = await resourceGroup.GetNetworkInterfaces().CreateOrUpdateAsync(WaitUntil.Completed, nicName, nicInput);
+            Utilities.Log($"Created network interface: {networkInterfaceLro.Value.Data.Name}");
+            return networkInterfaceLro.Value;
+        }
+
         public static async Task<NetworkInterfaceResource> CreateNetworkInterface(ResourceGroupResource resourceGroup, ResourceIdentifier subnetId, string nicName)
         {
             nicName = string.IsNullOrEmpty(nicName) ? CreateRandomName("nic") : nicName;
@@ -116,6 +147,24 @@ namespace Azure.ResourceManager.Samples.Common
             return networkInterfaceLro.Value;
         }
 
+        public static async Task<PublicIPAddressResource> CreatePublicIP(ResourceGroupResource resourceGroup, string publicIpName)
+        {
+            publicIpName = string.IsNullOrEmpty(publicIpName) ? CreateRandomName("pip") : publicIpName;
+
+            Utilities.Log("Creating a public IP address...");
+            PublicIPAddressData publicIPInput = new PublicIPAddressData()
+            {
+                Location = resourceGroup.Data.Location,
+               
+                PublicIPAllocationMethod = NetworkIPAllocationMethod.Dynamic,
+                DnsSettings = new PublicIPAddressDnsSettings { DomainNameLabel = publicIpName },
+            };
+            _ = await resourceGroup.GetPublicIPAddresses().CreateOrUpdateAsync(WaitUntil.Completed, publicIpName, publicIPInput);
+            var publicIPLro = await resourceGroup.GetPublicIPAddresses().GetAsync(publicIpName);
+            Utilities.Log($"Created a public IP address: {publicIPLro.Value.Data.Name}");
+            return publicIPLro.Value;
+        }
+
         public static void PrintVirtualMachine(VirtualMachineResource vm)
         {
             Utilities.Log("VM name: " + vm.Data.Name);
@@ -130,6 +179,62 @@ namespace Azure.ResourceManager.Samples.Common
             }
             Utilities.Log("Tag count: " + vm.Data.Tags.Count);
             Utilities.Log();
+        }
+
+        public static void DeprovisionAgentInLinuxVM(string host, int port, string userName, string password)
+        {
+            Console.WriteLine("Trying to de-provision: " + host);
+            Console.WriteLine("ssh connection status: " + TrySsh(
+                host,
+                port,
+                userName,
+                password,
+                "sudo waagent -deprovision+user --force"));
+        }
+
+        private static string TrySsh(string host, int port, string userName, string password, string commandToExecute)
+        {
+            string commandOutput = null;
+            var backoffTime = 30 * 1000;
+            var retryCount = 3;
+
+            while (retryCount > 0)
+            {
+                using (var sshClient = new SshClient(host, port, userName, password))
+                {
+                    try
+                    {
+                        sshClient.Connect();
+                        if (commandToExecute != null)
+                        {
+                            using (var command = sshClient.CreateCommand(commandToExecute))
+                            {
+                                commandOutput = command.Execute();
+                            }
+                        }
+                        break;
+                    }
+                    catch (Exception exception)
+                    {
+                        retryCount--;
+                        if (retryCount == 0)
+                        {
+                            throw exception;
+                        }
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            sshClient.Disconnect();
+                        }
+                        catch { }
+                    }
+                }
+                Thread.Sleep(backoffTime);
+            }
+
+            return commandOutput;
         }
     }
 }
